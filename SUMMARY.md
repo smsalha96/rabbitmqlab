@@ -1,7 +1,3 @@
-# .NET Stack - Complete File List
-
-## ✅ Code Files Created
-
 ### SOAP Producer (ASP.NET Core + SoapCore)
 📁 `/dotnet-stack/SoapProducer/`
 - ✅ `SoapProducer.csproj` - Project file
