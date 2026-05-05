@@ -117,6 +117,6 @@ Both stacks implement:
 
 ## File Locations
 
-All files are in: `/home/claude/dotnet-stack/`
+All files are in: `/dotnet-stack/`
 
 Ready to zip and copy to your project!
