@@ -61,15 +61,15 @@
 ## Architecture Summary
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     KUBERNETES CLUSTER                       │
-│                                                              │
+┌────────────────────────────────────────────────────────────┐
+│                     KUBERNETES CLUSTER                     │
+│                                                            │
 │  ┌──────────────────────┐    ┌──────────────────────────┐  │
 │  │  python-stack (ns)   │    │  dotnet-stack (ns)       │  │
 │  │                      │    │                          │  │
 │  │  FastAPI             │    │  SOAP API                │  │
 │  │     ↓                │    │     ↓                    │  │
-│  │  RabbitMQ ───────────┼────┼─── RabbitMQ             │  │
+│  │  RabbitMQ ───────────┼────┼─── RabbitMQ              │  │
 │  │  (shared)            │    │  (shared)                │  │
 │  │     ↓                │    │     ↓                    │  │
 │  │  3x Python           │    │  3x .NET                 │  │
@@ -78,8 +78,8 @@
 │  │  PostgreSQL          │    │  SQL Server              │  │
 │  │                      │    │  Express                 │  │
 │  └──────────────────────┘    └──────────────────────────┘  │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
+│                                                            │
+└────────────────────────────────────────────────────────────┘
 
 Queue Isolation:
 - Python: py_incident_queue, py_incident_broadcast, etc.
@@ -107,7 +107,6 @@ Both stacks implement:
 1. Copy all files to your project
 2. Follow DEPLOYMENT.md to build and deploy
 3. Test both stacks independently
-4. Update Word documentation with .NET stack details
 
 ---
 
