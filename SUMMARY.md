@@ -3,7 +3,7 @@
 ## ✅ Code Files Created
 
 ### SOAP Producer (ASP.NET Core + SoapCore)
-📁 `/home/claude/dotnet-stack/SoapProducer/`
+📁 `/dotnet-stack/SoapProducer/`
 - ✅ `SoapProducer.csproj` - Project file
 - ✅ `Program.cs` - ASP.NET Core + SoapCore setup
 - ✅ `Models.cs` - SOAP contracts and data models
@@ -18,7 +18,7 @@
 ---
 
 ### .NET Consumer (C# + RabbitMQ.Client)
-📁 `/home/claude/dotnet-stack/DotnetConsumer/`
+📁 `/dotnet-stack/DotnetConsumer/`
 - ✅ `DotnetConsumer.csproj` - Project file
 - ✅ `Program.cs` - Main consumer with all 8 pattern subscriptions
 - ✅ `MessageHandlers.cs` - Message processing for all 8 patterns
@@ -33,7 +33,7 @@
 ---
 
 ### SQL Server
-📁 `/home/claude/dotnet-stack/sql-scripts/`
+📁 `/dotnet-stack/sql-scripts/`
 - ✅ `init.sql` - Database schema, tables, stored procedures
 
 **Tables:**
@@ -47,7 +47,7 @@
 ---
 
 ### Kubernetes Manifests
-📁 `/home/claude/dotnet-stack/k8s-manifests/`
+📁 `/dotnet-stack/k8s-manifests/`
 - ✅ `namespaces.yaml` - python-stack + dotnet-stack namespaces
 - ✅ `dotnet-secrets.yaml` - RabbitMQ & SQL Server credentials
 - ✅ `sqlserver-deployment.yaml` - SQL Server Express deployment + service
@@ -57,7 +57,7 @@
 ---
 
 ### Documentation
-📁 `/home/claude/dotnet-stack/`
+📁 `/dotnet-stack/`
 - ✅ `DEPLOYMENT.md` - Complete deployment guide for both stacks
 
 ---
