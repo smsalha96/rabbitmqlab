@@ -115,8 +115,7 @@ kubectl port-forward service/ha-rabbitmq 15672:15672
 
 - **FastAPI**: http://localhost:8080/docs
 - **SOAP API**: http://localhost:8081/IncidentService.asmx?wsdl
-- **RabbitMQ**: http://localhost:15672 (admin/labpassword123)
-
+- **RabbitMQ**: http://localhost:15672
 ---
 
 ## Queue Isolation
