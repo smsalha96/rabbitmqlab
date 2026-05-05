@@ -1,0 +1,152 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# incident-apps.yaml
+# Producer (REST API) and Consumer (worker) deployments.
+# All credentials are injected from Kubernetes Secrets — nothing is hardcoded.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Producer Deployment ───────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: producer-api
+  labels:
+    app: producer
+    component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: producer
+  template:
+    metadata:
+      labels:
+        app: producer
+        component: api
+    spec:
+      containers:
+      - name: api
+        image: incident-app:v4
+        imagePullPolicy: Never
+        command: ["uvicorn", "producer:app", "--host", "0.0.0.0", "--port", "80"]
+        ports:
+        - name: http
+          containerPort: 80
+        env:
+        # ── Service hostnames (not secret, just config) ────────────────────
+        - name: RABBITMQ_HOST
+          value: "ha-rabbitmq"           # matches the RabbitMQ Service name
+        - name: POSTGRES_HOST
+          value: "postgres-svc"          # matches the PostgreSQL Service name
+        - name: POSTGRES_DB
+          value: "incident_db"
+        # ── Database credentials (from Secret) ────────────────────────────
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: db-secrets
+              key: username
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secrets
+              key: password
+        # ── RabbitMQ credentials (from Secret) ────────────────────────────
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secrets
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secrets
+              key: password
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+
+---
+# ── Producer Service ──────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: producer-api-svc
+  labels:
+    app: producer
+spec:
+  type: NodePort
+  selector:
+    app: producer
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 80
+    nodePort: 31556
+
+---
+# ── Consumer Deployment ───────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer-deployment
+  labels:
+    app: consumer
+    component: worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: consumer
+  template:
+    metadata:
+      labels:
+        app: consumer
+        component: worker
+    spec:
+      containers:
+      - name: consumer
+        image: incident-app:v4
+        imagePullPolicy: Never
+        command: ["python", "consumer.py"]
+        env:
+        # ── Service hostnames ──────────────────────────────────────────────
+        - name: RABBITMQ_HOST
+          value: "ha-rabbitmq"
+        - name: POSTGRES_HOST
+          value: "postgres-svc"
+        - name: POSTGRES_DB
+          value: "incident_db"
+        # ── Database credentials ───────────────────────────────────────────
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: db-secrets
+              key: username
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secrets
+              key: password
+        # ── RabbitMQ credentials ───────────────────────────────────────────
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secrets
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secrets
+              key: password
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"

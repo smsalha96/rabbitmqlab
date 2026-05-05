@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dotnet-consumer
+  namespace: dotnet-stack
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dotnet-consumer
+  template:
+    metadata:
+      labels:
+        app: dotnet-consumer
+    spec:
+      containers:
+      - name: dotnet-consumer
+        image: dotnet-consumer:v1
+        imagePullPolicy: Never
+        env:
+        - name: RABBITMQ_HOST
+          value: "ha-rabbitmq.default.svc.cluster.local"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: dotnet-secrets
+              key: rabbitmq-user
+        - name: RABBITMQ_PASS
+          valueFrom:
+            secretKeyRef:
+              name: dotnet-secrets
+              key: rabbitmq-password
+        - name: SQL_SERVER
+          value: "sqlserver-service.dotnet-stack.svc.cluster.local"
+        - name: SQL_DATABASE
+          value: "IncidentDB"
+        - name: SQL_USER
+          valueFrom:
+            secretKeyRef:
+              name: dotnet-secrets
+              key: sql-user
+        - name: SQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: dotnet-secrets
+              key: sql-password
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"

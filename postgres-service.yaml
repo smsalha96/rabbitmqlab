@@ -1,0 +1,285 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# postgres-service.yaml
+# PostgreSQL: ConfigMap (init SQL), Service, and Deployment.
+# ──────────────────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-script
+data:
+  init.sql: |
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- TABLE 1: support_tickets
+    -- Stores every processed incident ticket (Patterns 1, 2, 3, 4, 5, 7, 8)
+    -- ══════════════════════════════════════════════════════════════════════════
+    CREATE TABLE IF NOT EXISTS support_tickets (
+        request_id                  SERIAL        PRIMARY KEY,
+        requester_email             VARCHAR(255)  NOT NULL,
+        issue_description           TEXT          NOT NULL,
+        categorization              VARCHAR(100)  DEFAULT 'Pending',
+        status                      VARCHAR(50)   DEFAULT 'Queued',
+        handled_by_pod              VARCHAR(100),
+        processing_duration_seconds FLOAT,
+        created_at                  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- TABLE 2: pattern_events
+    -- ══════════════════════════════════════════════════════════════════════════
+    CREATE TABLE IF NOT EXISTS pattern_events (
+        id          SERIAL        PRIMARY KEY,
+        request_id  VARCHAR(50)   NOT NULL,
+        pattern     VARCHAR(50)   NOT NULL,   -- default | fanout | direct | topic | dlq | ttl | priority | ack_mode
+        exchange    VARCHAR(100)  NOT NULL,
+        routing_key VARCHAR(200)  NOT NULL,
+        outcome     VARCHAR(200)  NOT NULL,   -- published | routed | dropped | force_fail | ttl=Ns | priority=N | ack_mode
+        created_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- STORED PROCEDURES & FUNCTIONS
+    -- ══════════════════════════════════════════════════════════════════════════
+
+    -- ── SP 1: Consumer — insert a processed ticket ────────────────────────────
+    CREATE OR REPLACE PROCEDURE create_incident_ticket(
+        p_email    VARCHAR,
+        p_desc     TEXT,
+        p_category VARCHAR,
+        p_pod      VARCHAR,
+        p_duration FLOAT
+    )
+    LANGUAGE plpgsql AS $$
+    BEGIN
+        INSERT INTO support_tickets
+            (requester_email, issue_description, categorization, handled_by_pod, processing_duration_seconds)
+        VALUES
+            (p_email, p_desc, p_category, p_pod, p_duration);
+    END;
+    $$;
+
+    -- ── SP 2: Producer/Consumer — log a pattern event ─────────────────────────
+    -- Called after every publish (producer) and every consume (consumer)
+    CREATE OR REPLACE PROCEDURE log_pattern_event(
+        p_request_id  VARCHAR,
+        p_pattern     VARCHAR,
+        p_exchange    VARCHAR,
+        p_routing_key VARCHAR,
+        p_outcome     VARCHAR
+    )
+    LANGUAGE plpgsql AS $$
+    BEGIN
+        INSERT INTO pattern_events (request_id, pattern, exchange, routing_key, outcome)
+        VALUES (p_request_id, p_pattern, p_exchange, p_routing_key, p_outcome);
+    END;
+    $$;
+
+    -- ── SP 3: Admin — truncate all data ───────────────────────────────────────
+    CREATE OR REPLACE PROCEDURE admin_clear_database()
+    LANGUAGE plpgsql AS $$
+    BEGIN
+        TRUNCATE TABLE support_tickets  RESTART IDENTITY;
+        TRUNCATE TABLE pattern_events   RESTART IDENTITY;
+    END;
+    $$;
+
+    -- ── FN 1: API — ticket history for a user ────────────────────────────────
+    CREATE OR REPLACE FUNCTION get_user_ticket_history(p_email VARCHAR)
+    RETURNS TABLE (
+        req_id    INT,
+        desc_text TEXT,
+        cat       VARCHAR,
+        stat      VARCHAR,
+        pod       VARCHAR,
+        duration  FLOAT
+    )
+    LANGUAGE plpgsql AS $$
+    BEGIN
+        RETURN QUERY
+        SELECT request_id, issue_description, categorization, status,
+               handled_by_pod, processing_duration_seconds
+        FROM   support_tickets
+        WHERE  requester_email = p_email
+        ORDER  BY created_at DESC;
+    END;
+    $$;
+
+    -- ── FN 2: API — system-wide metrics ──────────────────────────────────────
+    CREATE OR REPLACE FUNCTION get_system_metrics()
+    RETURNS json
+    LANGUAGE plpgsql AS $$
+    DECLARE
+        v_total INT;
+        v_avg   FLOAT;
+        v_cats  json;
+    BEGIN
+        SELECT COUNT(*),
+               COALESCE(ROUND(AVG(processing_duration_seconds)::NUMERIC, 2), 0)
+        INTO   v_total, v_avg
+        FROM   support_tickets;
+
+        SELECT json_agg(json_build_object('category', categorization, 'count', cat_count))
+        INTO   v_cats
+        FROM (
+            SELECT categorization, COUNT(*) AS cat_count
+            FROM   support_tickets
+            GROUP  BY categorization
+            ORDER  BY cat_count DESC
+        ) sub;
+
+        RETURN json_build_object(
+            'total_tickets_processed',     v_total,
+            'average_processing_time_sec', v_avg,
+            'category_breakdown',          COALESCE(v_cats, '[]'::json)
+        );
+    END;
+    $$;
+
+    -- ── FN 3: API — all pattern events (audit log) ────────────────────────────
+    -- Returns the full pattern_events table so you can see every message
+    -- journey: which exchange it went through, what the outcome was.
+    CREATE OR REPLACE FUNCTION get_pattern_events()
+    RETURNS TABLE (
+        id          INT,
+        request_id  VARCHAR,
+        pattern     VARCHAR,
+        exchange    VARCHAR,
+        routing_key VARCHAR,
+        outcome     VARCHAR,
+        created_at  TIMESTAMP
+    )
+    LANGUAGE plpgsql AS $$
+    BEGIN
+        RETURN QUERY
+        SELECT pe.id, pe.request_id, pe.pattern, pe.exchange,
+               pe.routing_key, pe.outcome, pe.created_at
+        FROM   pattern_events pe
+        ORDER  BY pe.created_at DESC;
+    END;
+    $$;
+
+    -- ── FN 4: API — pattern summary stats ────────────────────────────────────
+    -- Useful for seeing at a glance how many messages each pattern has handled
+    -- and what the outcomes were (routed vs dropped, ack'd vs nack'd etc.)
+    CREATE OR REPLACE FUNCTION get_pattern_summary()
+    RETURNS json
+    LANGUAGE plpgsql AS $$
+    DECLARE
+        v_by_pattern json;
+        v_by_outcome json;
+        v_total      INT;
+    BEGIN
+        SELECT COUNT(*) INTO v_total FROM pattern_events;
+
+        SELECT json_agg(json_build_object('pattern', pattern, 'count', cnt))
+        INTO   v_by_pattern
+        FROM (
+            SELECT pattern, COUNT(*) AS cnt
+            FROM   pattern_events
+            GROUP  BY pattern
+            ORDER  BY cnt DESC
+        ) sub;
+
+        SELECT json_agg(json_build_object('outcome', outcome, 'count', cnt))
+        INTO   v_by_outcome
+        FROM (
+            SELECT outcome, COUNT(*) AS cnt
+            FROM   pattern_events
+            GROUP  BY outcome
+            ORDER  BY cnt DESC
+        ) sub;
+
+        RETURN json_build_object(
+            'total_events',      v_total,
+            'by_pattern',        COALESCE(v_by_pattern, '[]'::json),
+            'by_outcome',        COALESCE(v_by_outcome, '[]'::json)
+        );
+    END;
+    $$;
+
+    -- ── FN 5: API — single ticket lookup ─────────────────────────────────────
+    CREATE OR REPLACE FUNCTION get_ticket_by_id(p_request_id INT)
+    RETURNS TABLE (
+        req_email VARCHAR,
+        desc_text TEXT,
+        cat       VARCHAR,
+        stat      VARCHAR,
+        pod       VARCHAR
+    )
+    LANGUAGE plpgsql AS $$
+    BEGIN
+        RETURN QUERY
+        SELECT requester_email, issue_description, categorization,
+               status, handled_by_pod
+        FROM   support_tickets
+        WHERE  request_id = p_request_id;
+    END;
+    $$;
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-svc
+  labels:
+    app: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+  - name: postgres
+    protocol: TCP
+    port: 5432
+    targetPort: 5432
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: db-secrets
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secrets
+              key: password
+        - name: POSTGRES_DB
+          value: incident_db
+        ports:
+        - name: postgres
+          containerPort: 5432
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        volumeMounts:
+        - name: init-script
+          mountPath: /docker-entrypoint-initdb.d/
+      volumes:
+      - name: init-script
+        configMap:
+          name: postgres-init-script

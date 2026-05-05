@@ -1,0 +1,7 @@
+# Never commit secrets to Git
+secrets.yaml
+
+# Python
+__pycache__/
+*.pyc
+.env

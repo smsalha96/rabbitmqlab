@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: soap-producer
+  namespace: dotnet-stack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: soap-producer
+  template:
+    metadata:
+      labels:
+        app: soap-producer
+    spec:
+      containers:
+      - name: soap-producer
+        image: soap-producer:v1
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+        env:
+        - name: RABBITMQ_HOST
+          value: "ha-rabbitmq.default.svc.cluster.local"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: dotnet-secrets
+              key: rabbitmq-user
+        - name: RABBITMQ_PASS
+          valueFrom:
+            secretKeyRef:
+              name: dotnet-secrets
+              key: rabbitmq-password
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: soap-producer-service
+  namespace: dotnet-stack
+spec:
+  selector:
+    app: soap-producer
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
