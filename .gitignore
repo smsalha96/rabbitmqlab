@@ -1,6 +1,6 @@
 # Never commit secrets to Git
 secrets.yaml
-
+dotnet-stack\k8s-manifests\dotnet-secrets.yaml
 # Python
 __pycache__/
 *.pyc
