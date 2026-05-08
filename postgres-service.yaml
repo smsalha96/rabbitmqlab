@@ -9,10 +9,50 @@ metadata:
   name: postgres-init-script
 data:
   init.sql: |
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- PostgreSQL Initialization Script
+    -- Creates unified schema matching SQL Server for dual-stack consistency
+    -- ══════════════════════════════════════════════════════════════════════════
 
     -- ══════════════════════════════════════════════════════════════════════════
-    -- TABLE 1: support_tickets
-    -- Stores every processed incident ticket (Patterns 1, 2, 3, 4, 5, 7, 8)
+    -- TABLE: incidents (unified schema for both Python and .NET)
+    -- Primary identifier: request_id (from logs, NOT auto-increment)
+    -- ══════════════════════════════════════════════════════════════════════════
+    CREATE TABLE IF NOT EXISTS incidents (
+        id                      SERIAL,
+        request_id              VARCHAR(100)  PRIMARY KEY,  -- From message/logs (e.g., 'abc123' or UUID)
+        email                   VARCHAR(200),
+        description             TEXT,
+        category                VARCHAR(100),
+        pod_id                  VARCHAR(50),
+        duration_seconds        FLOAT,
+        source                  VARCHAR(20)   DEFAULT 'python',  -- 'python' or 'dotnet'
+        created_at              TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+        updated_at              TIMESTAMP
+    );
+
+    -- Indexes for performance
+    CREATE INDEX IF NOT EXISTS idx_incidents_created_at ON incidents(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_incidents_source ON incidents(source);
+    CREATE INDEX IF NOT EXISTS idx_incidents_pod_id ON incidents(pod_id);
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- TABLE: pattern_events (for tracking message flow patterns)
+    -- ══════════════════════════════════════════════════════════════════════════
+    CREATE TABLE IF NOT EXISTS pattern_events (
+        id          SERIAL        PRIMARY KEY,
+        request_id  VARCHAR(100)  NOT NULL,
+        pattern     VARCHAR(50)   NOT NULL,   -- default | fanout | direct | topic | dlq | ttl | priority | ack_mode
+        exchange    VARCHAR(100)  NOT NULL,
+        routing_key VARCHAR(200)  NOT NULL,
+        outcome     VARCHAR(200)  NOT NULL,
+        created_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pattern_events_request_id ON pattern_events(request_id);
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- TABLE: support_tickets (legacy/backup table - kept for compatibility)
     -- ══════════════════════════════════════════════════════════════════════════
     CREATE TABLE IF NOT EXISTS support_tickets (
         request_id                  SERIAL        PRIMARY KEY,
@@ -26,41 +66,30 @@ data:
     );
 
     -- ══════════════════════════════════════════════════════════════════════════
-    -- TABLE 2: pattern_events
-    -- ══════════════════════════════════════════════════════════════════════════
-    CREATE TABLE IF NOT EXISTS pattern_events (
-        id          SERIAL        PRIMARY KEY,
-        request_id  VARCHAR(50)   NOT NULL,
-        pattern     VARCHAR(50)   NOT NULL,   -- default | fanout | direct | topic | dlq | ttl | priority | ack_mode
-        exchange    VARCHAR(100)  NOT NULL,
-        routing_key VARCHAR(200)  NOT NULL,
-        outcome     VARCHAR(200)  NOT NULL,   -- published | routed | dropped | force_fail | ttl=Ns | priority=N | ack_mode
-        created_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- ══════════════════════════════════════════════════════════════════════════
-    -- STORED PROCEDURES & FUNCTIONS
+    -- STORED PROCEDURES
     -- ══════════════════════════════════════════════════════════════════════════
 
-    -- ── SP 1: Consumer — insert a processed ticket ────────────────────────────
+    -- ── SP 1: Insert incident (unified procedure for both stacks) ────────────
     CREATE OR REPLACE PROCEDURE create_incident_ticket(
-        p_email    VARCHAR,
-        p_desc     TEXT,
-        p_category VARCHAR,
-        p_pod      VARCHAR,
-        p_duration FLOAT
+        p_request_id VARCHAR,
+        p_email      VARCHAR,
+        p_desc       TEXT,
+        p_category   VARCHAR,
+        p_pod        VARCHAR,
+        p_duration   FLOAT
     )
     LANGUAGE plpgsql AS $$
     BEGIN
-        INSERT INTO support_tickets
-            (requester_email, issue_description, categorization, handled_by_pod, processing_duration_seconds)
+        INSERT INTO incidents
+            (request_id, email, description, category, pod_id, duration_seconds, source, created_at)
         VALUES
-            (p_email, p_desc, p_category, p_pod, p_duration);
+            (p_request_id, p_email, p_desc, p_category, p_pod, p_duration, 'python', CURRENT_TIMESTAMP)
+        ON CONFLICT (request_id) DO UPDATE
+            SET updated_at = CURRENT_TIMESTAMP;
     END;
     $$;
 
-    -- ── SP 2: Producer/Consumer — log a pattern event ─────────────────────────
-    -- Called after every publish (producer) and every consume (consumer)
+    -- ── SP 2: Log pattern event ──────────────────────────────────────────────
     CREATE OR REPLACE PROCEDURE log_pattern_event(
         p_request_id  VARCHAR,
         p_pattern     VARCHAR,
@@ -75,145 +104,56 @@ data:
     END;
     $$;
 
-    -- ── SP 3: Admin — truncate all data ───────────────────────────────────────
+    -- ── SP 3: Admin cleanup ──────────────────────────────────────────────────
     CREATE OR REPLACE PROCEDURE admin_clear_database()
     LANGUAGE plpgsql AS $$
     BEGIN
-        TRUNCATE TABLE support_tickets  RESTART IDENTITY;
-        TRUNCATE TABLE pattern_events   RESTART IDENTITY;
+        TRUNCATE TABLE incidents        RESTART IDENTITY CASCADE;
+        TRUNCATE TABLE pattern_events   RESTART IDENTITY CASCADE;
+        TRUNCATE TABLE support_tickets  RESTART IDENTITY CASCADE;
     END;
     $$;
 
-    -- ── FN 1: API — ticket history for a user ────────────────────────────────
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- FUNCTIONS (for querying/analytics)
+    -- ══════════════════════════════════════════════════════════════════════════
+
+    -- ── FN 1: Get user ticket history ────────────────────────────────────────
     CREATE OR REPLACE FUNCTION get_user_ticket_history(p_email VARCHAR)
     RETURNS TABLE (
-        req_id    INT,
-        desc_text TEXT,
-        cat       VARCHAR,
-        stat      VARCHAR,
-        pod       VARCHAR,
-        duration  FLOAT
+        req_id       VARCHAR,
+        desc_text    TEXT,
+        cat          VARCHAR,
+        pod          VARCHAR,
+        duration     FLOAT,
+        created      TIMESTAMP
     )
     LANGUAGE plpgsql AS $$
     BEGIN
         RETURN QUERY
-        SELECT request_id, issue_description, categorization, status,
-               handled_by_pod, processing_duration_seconds
-        FROM   support_tickets
-        WHERE  requester_email = p_email
+        SELECT request_id, description, category, pod_id, duration_seconds, created_at
+        FROM   incidents
+        WHERE  email = p_email
         ORDER  BY created_at DESC;
     END;
     $$;
 
-    -- ── FN 2: API — system-wide metrics ──────────────────────────────────────
-    CREATE OR REPLACE FUNCTION get_system_metrics()
-    RETURNS json
-    LANGUAGE plpgsql AS $$
-    DECLARE
-        v_total INT;
-        v_avg   FLOAT;
-        v_cats  json;
-    BEGIN
-        SELECT COUNT(*),
-               COALESCE(ROUND(AVG(processing_duration_seconds)::NUMERIC, 2), 0)
-        INTO   v_total, v_avg
-        FROM   support_tickets;
-
-        SELECT json_agg(json_build_object('category', categorization, 'count', cat_count))
-        INTO   v_cats
-        FROM (
-            SELECT categorization, COUNT(*) AS cat_count
-            FROM   support_tickets
-            GROUP  BY categorization
-            ORDER  BY cat_count DESC
-        ) sub;
-
-        RETURN json_build_object(
-            'total_tickets_processed',     v_total,
-            'average_processing_time_sec', v_avg,
-            'category_breakdown',          COALESCE(v_cats, '[]'::json)
-        );
-    END;
-    $$;
-
-    -- ── FN 3: API — all pattern events (audit log) ────────────────────────────
-    -- Returns the full pattern_events table so you can see every message
-    -- journey: which exchange it went through, what the outcome was.
-    CREATE OR REPLACE FUNCTION get_pattern_events()
+    -- ── FN 2: Get recent tickets ─────────────────────────────────────────────
+    CREATE OR REPLACE FUNCTION get_recent_tickets(p_limit INT DEFAULT 50)
     RETURNS TABLE (
-        id          INT,
-        request_id  VARCHAR,
-        pattern     VARCHAR,
-        exchange    VARCHAR,
-        routing_key VARCHAR,
-        outcome     VARCHAR,
-        created_at  TIMESTAMP
-    )
-    LANGUAGE plpgsql AS $$
-    BEGIN
-        RETURN QUERY
-        SELECT pe.id, pe.request_id, pe.pattern, pe.exchange,
-               pe.routing_key, pe.outcome, pe.created_at
-        FROM   pattern_events pe
-        ORDER  BY pe.created_at DESC;
-    END;
-    $$;
-
-    -- ── FN 4: API — pattern summary stats ────────────────────────────────────
-    -- Useful for seeing at a glance how many messages each pattern has handled
-    -- and what the outcomes were (routed vs dropped, ack'd vs nack'd etc.)
-    CREATE OR REPLACE FUNCTION get_pattern_summary()
-    RETURNS json
-    LANGUAGE plpgsql AS $$
-    DECLARE
-        v_by_pattern json;
-        v_by_outcome json;
-        v_total      INT;
-    BEGIN
-        SELECT COUNT(*) INTO v_total FROM pattern_events;
-
-        SELECT json_agg(json_build_object('pattern', pattern, 'count', cnt))
-        INTO   v_by_pattern
-        FROM (
-            SELECT pattern, COUNT(*) AS cnt
-            FROM   pattern_events
-            GROUP  BY pattern
-            ORDER  BY cnt DESC
-        ) sub;
-
-        SELECT json_agg(json_build_object('outcome', outcome, 'count', cnt))
-        INTO   v_by_outcome
-        FROM (
-            SELECT outcome, COUNT(*) AS cnt
-            FROM   pattern_events
-            GROUP  BY outcome
-            ORDER  BY cnt DESC
-        ) sub;
-
-        RETURN json_build_object(
-            'total_events',      v_total,
-            'by_pattern',        COALESCE(v_by_pattern, '[]'::json),
-            'by_outcome',        COALESCE(v_by_outcome, '[]'::json)
-        );
-    END;
-    $$;
-
-    -- ── FN 5: API — single ticket lookup ─────────────────────────────────────
-    CREATE OR REPLACE FUNCTION get_ticket_by_id(p_request_id INT)
-    RETURNS TABLE (
-        req_email VARCHAR,
-        desc_text TEXT,
+        req_id    VARCHAR,
+        email_    VARCHAR,
         cat       VARCHAR,
-        stat      VARCHAR,
-        pod       VARCHAR
+        source_   VARCHAR,
+        created   TIMESTAMP
     )
     LANGUAGE plpgsql AS $$
     BEGIN
         RETURN QUERY
-        SELECT requester_email, issue_description, categorization,
-               status, handled_by_pod
-        FROM   support_tickets
-        WHERE  request_id = p_request_id;
+        SELECT request_id, email, category, source, created_at
+        FROM   incidents
+        ORDER  BY created_at DESC
+        LIMIT  p_limit;
     END;
     $$;
 
@@ -265,7 +205,7 @@ spec:
               name: db-secrets
               key: password
         - name: POSTGRES_DB
-          value: incident_db
+          value: incidents
         ports:
         - name: postgres
           containerPort: 5432
