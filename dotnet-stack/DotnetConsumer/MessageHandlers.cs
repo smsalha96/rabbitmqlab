@@ -9,11 +9,13 @@ public class MessageHandlers
 {
     private readonly SqlServerRepository _repository;
     private readonly IModel _channel;
+    private readonly string _podId;
 
     public MessageHandlers(SqlServerRepository repository, IModel channel)
     {
         _repository = repository;
         _channel = channel;
+        _podId = Environment.GetEnvironmentVariable("HOSTNAME") ?? "unknown-pod";
     }
 
     // Pattern 1: Point-to-Point (Default Queue)
@@ -21,21 +23,52 @@ public class MessageHandlers
     {
         var body = e.Body.ToArray();
         var message = Encoding.UTF8.GetString(body);
-        
-        Console.WriteLine($"[.NET Consumer] Processing ticket: {message}");
+        var startTime = DateTime.Now;
 
         try
         {
             var data = JsonDocument.Parse(message);
-            _repository.SaveTicket(data).Wait();
+            var ticketId = data.RootElement.GetProperty("ticket_id").GetString() ?? "UNKNOWN";
+            var email = data.RootElement.TryGetProperty("email", out var emailProp)
+                ? emailProp.GetString()
+                : "unknown@test.com";
+            var severity = data.RootElement.TryGetProperty("severity", out var sevProp)
+                ? sevProp.GetString()
+                : "n/a";
+
+            // Log receipt with full metadata
+            LogHelper.LogInfo(ticketId,
+                $"▶ RECEIVED | path: DEFAULT exchange → routing_key='{e.RoutingKey}' | " +
+                $"delivery_tag={e.DeliveryTag} | redelivered={e.Redelivered} | " +
+                $"email='{email}' | severity='{severity}' | body={body.Length}B");
+
+            // Simulate processing
+            Thread.Sleep(Random.Shared.Next(1500, 3500));
+
+            var duration = (DateTime.Now - startTime).TotalSeconds;
+
+            // Save to database
+            _repository.SaveTicket(data, _podId, duration).Wait();
             _repository.LogPatternEvent("point_to_point", message).Wait();
 
+            // ACK
             _channel.BasicAck(e.DeliveryTag, false);
-            Console.WriteLine($"[.NET] ✓ Ticket processed");
+
+            LogHelper.LogInfo(ticketId,
+                $"✔ ACK sent | ack_mode='manual_ack' | total_time={duration:F3}s | " +
+                $"path: DEFAULT exchange → routing_key='{e.RoutingKey}'");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[.NET ERROR] {ex.Message}");
+            var ticketId = "PARSE-ERR";
+            try
+            {
+                var data = JsonDocument.Parse(message);
+                ticketId = data.RootElement.GetProperty("ticket_id").GetString() ?? "UNKNOWN";
+            }
+            catch { }
+
+            LogHelper.LogError(ticketId, $"✘ Processing failed | {ex.Message}");
             _channel.BasicNack(e.DeliveryTag, false, false);
         }
     }
@@ -45,18 +78,26 @@ public class MessageHandlers
     {
         var body = e.Body.ToArray();
         var message = Encoding.UTF8.GetString(body);
-        
-        Console.WriteLine($"[.NET Consumer] Pub/Sub message: {message}");
 
         try
         {
+            var data = JsonDocument.Parse(message);
+            var reqId = data.RootElement.TryGetProperty("request_id", out var reqProp)
+                ? reqProp.GetString()
+                : "UNKNOWN";
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN",
+                $"▶ BROADCAST RECEIVED | exchange='dotnet_incident_broadcast' | " +
+                $"delivery_tag={e.DeliveryTag} | ALL .NET consumers got this!");
+
             _repository.LogPatternEvent("pub_sub", message).Wait();
             _channel.BasicAck(e.DeliveryTag, false);
-            Console.WriteLine($"[.NET] ✓ Pub/Sub processed");
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN", "✔ ACK | Pub/Sub processed");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[.NET ERROR] {ex.Message}");
+            LogHelper.LogError("PUBSUB-ERR", $"✘ Error | {ex.Message}");
             _channel.BasicNack(e.DeliveryTag, false, false);
         }
     }
@@ -67,18 +108,27 @@ public class MessageHandlers
         var body = e.Body.ToArray();
         var message = Encoding.UTF8.GetString(body);
         var routingKey = e.RoutingKey;
-        
-        Console.WriteLine($"[.NET Consumer] Routing message [{routingKey}]: {message}");
 
         try
         {
+            var data = JsonDocument.Parse(message);
+            var reqId = data.RootElement.TryGetProperty("request_id", out var reqProp)
+                ? reqProp.GetString()
+                : "UNKNOWN";
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN",
+                $"▶ ROUTING RECEIVED | exchange='dotnet_incident_routing' | " +
+                $"routing_key='{routingKey}' | delivery_tag={e.DeliveryTag}");
+
             _repository.LogPatternEvent($"routing_{routingKey}", message).Wait();
             _channel.BasicAck(e.DeliveryTag, false);
-            Console.WriteLine($"[.NET] ✓ Routing processed: {routingKey}");
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN",
+                $"✔ ACK | Routed message: severity='{routingKey}'");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[.NET ERROR] {ex.Message}");
+            LogHelper.LogError("ROUTING-ERR", $"✘ Error | {ex.Message}");
             _channel.BasicNack(e.DeliveryTag, false, false);
         }
     }
@@ -89,18 +139,39 @@ public class MessageHandlers
         var body = e.Body.ToArray();
         var message = Encoding.UTF8.GetString(body);
         var routingKey = e.RoutingKey;
-        
-        Console.WriteLine($"[.NET Consumer] Topic message [{routingKey}]: {message}");
 
         try
         {
+            var data = JsonDocument.Parse(message);
+            var reqId = data.RootElement.TryGetProperty("request_id", out var reqProp)
+                ? reqProp.GetString()
+                : "UNKNOWN";
+
+            // Determine which patterns matched
+            var parts = routingKey.Split('.');
+            var matched = new List<string>();
+            
+            if (routingKey.StartsWith("incident.") || routingKey == "incident")
+                matched.Add("incident.#");
+            if (parts.Length == 3 && parts[1] == "critical")
+                matched.Add("*.critical.*");
+            if (parts.Length == 3 && parts[0] == "incident" && parts[2] == "network")
+                matched.Add("incident.*.network");
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN",
+                $"▶ TOPIC RECEIVED | exchange='dotnet_incident_topic' | " +
+                $"routing_key='{routingKey}' | matched_bindings=[{string.Join(", ", matched)}] | " +
+                $"delivery_tag={e.DeliveryTag}");
+
             _repository.LogPatternEvent($"topic_{routingKey}", message).Wait();
             _channel.BasicAck(e.DeliveryTag, false);
-            Console.WriteLine($"[.NET] ✓ Topic processed: {routingKey}");
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN",
+                $"✔ ACK | topic key='{routingKey}' matched {matched.Count} binding(s): [{string.Join(", ", matched)}]");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[.NET ERROR] {ex.Message}");
+            LogHelper.LogError("TOPIC-ERR", $"✘ Error | {ex.Message}");
             _channel.BasicNack(e.DeliveryTag, false, false);
         }
     }
@@ -110,29 +181,37 @@ public class MessageHandlers
     {
         var body = e.Body.ToArray();
         var message = Encoding.UTF8.GetString(body);
-        
-        Console.WriteLine($"[.NET Consumer] DLQ main: {message}");
 
         try
         {
             var data = JsonDocument.Parse(message);
-            var forceFail = data.RootElement.GetProperty("force_fail").GetBoolean();
+            var reqId = data.RootElement.TryGetProperty("request_id", out var reqProp)
+                ? reqProp.GetString()
+                : "UNKNOWN";
+            var forceFail = data.RootElement.TryGetProperty("force_fail", out var failProp) 
+                && failProp.GetBoolean();
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN",
+                $"▶ DLQ-MAIN RECEIVED | queue='dotnet_dlq_main_queue' | " +
+                $"force_fail={forceFail} | delivery_tag={e.DeliveryTag}");
 
             if (forceFail)
             {
-                Console.WriteLine($"[.NET] ✗ Forcing NACK - message will go to DLQ");
+                LogHelper.LogWarn(reqId ?? "UNKNOWN",
+                    "⚠ DLQ force_fail=True → NACK + requeue=False | " +
+                    "RabbitMQ will route this to dotnet_dlq_dead_exchange → dotnet_dlq_dead_queue");
                 _channel.BasicNack(e.DeliveryTag, false, false);
             }
             else
             {
                 _repository.LogPatternEvent("dlq_success", message).Wait();
                 _channel.BasicAck(e.DeliveryTag, false);
-                Console.WriteLine($"[.NET] ✓ DLQ message processed successfully");
+                LogHelper.LogInfo(reqId ?? "UNKNOWN", "✔ ACK | DLQ message processed successfully");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[.NET ERROR] {ex.Message}");
+            LogHelper.LogError("DLQ-MAIN-ERR", $"✘ Error | {ex.Message}");
             _channel.BasicNack(e.DeliveryTag, false, false);
         }
     }
@@ -142,18 +221,28 @@ public class MessageHandlers
     {
         var body = e.Body.ToArray();
         var message = Encoding.UTF8.GetString(body);
-        
-        Console.WriteLine($"[.NET Consumer] DLQ dead queue: {message}");
 
         try
         {
+            var data = JsonDocument.Parse(message);
+            var reqId = data.RootElement.TryGetProperty("request_id", out var reqProp)
+                ? reqProp.GetString()
+                : "UNKNOWN";
+
+            LogHelper.LogWarn(reqId ?? "UNKNOWN",
+                $"▶ DLQ-DEAD RECEIVED | queue='dotnet_dlq_dead_queue' | " +
+                $"Message in dead letter queue - manual review needed | " +
+                $"delivery_tag={e.DeliveryTag}");
+
             _repository.LogPatternEvent("dlq_dead_letter", message).Wait();
             _channel.BasicAck(e.DeliveryTag, false);
-            Console.WriteLine($"[.NET] ✓ Dead letter processed");
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN", "✔ ACK | Dead letter logged");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[.NET ERROR] {ex.Message}");
+            LogHelper.LogError("DLQ-DEAD-ERR", $"✘ Error | {ex.Message}");
+            _channel.BasicNack(e.DeliveryTag, false, false);
         }
     }
 
@@ -163,18 +252,27 @@ public class MessageHandlers
         var body = e.Body.ToArray();
         var message = Encoding.UTF8.GetString(body);
         var priority = e.BasicProperties.Priority;
-        
-        Console.WriteLine($"[.NET Consumer] Priority message [p={priority}]: {message}");
 
         try
         {
+            var data = JsonDocument.Parse(message);
+            var reqId = data.RootElement.TryGetProperty("request_id", out var reqProp)
+                ? reqProp.GetString()
+                : "UNKNOWN";
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN",
+                $"▶ PRIORITY RECEIVED | queue='dotnet_priority_queue' | " +
+                $"priority={priority} | delivery_tag={e.DeliveryTag}");
+
             _repository.LogPatternEvent($"priority_{priority}", message).Wait();
             _channel.BasicAck(e.DeliveryTag, false);
-            Console.WriteLine($"[.NET] ✓ Priority processed: {priority}");
+
+            LogHelper.LogInfo(reqId ?? "UNKNOWN",
+                $"✔ ACK | Priority {priority} message processed (higher priority processed first)");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[.NET ERROR] {ex.Message}");
+            LogHelper.LogError("PRIORITY-ERR", $"✘ Error | {ex.Message}");
             _channel.BasicNack(e.DeliveryTag, false, false);
         }
     }
@@ -184,46 +282,60 @@ public class MessageHandlers
     {
         var body = e.Body.ToArray();
         var message = Encoding.UTF8.GetString(body);
-        
-        Console.WriteLine($"[.NET Consumer] ACK test: {message}");
 
         try
         {
             var data = JsonDocument.Parse(message);
-            var mode = data.RootElement.GetProperty("ack_mode").GetString();
+            var reqId = data.RootElement.TryGetProperty("request_id", out var reqProp)
+                ? reqProp.GetString()
+                : "UNKNOWN";
+            var ackMode = data.RootElement.TryGetProperty("ack_mode", out var modeProp)
+                ? modeProp.GetString()
+                : "manual_ack";
 
-            _repository.LogPatternEvent($"ack_mode_{mode}", message).Wait();
+            LogHelper.LogInfo(reqId ?? "UNKNOWN",
+                $"▶ ACK-TEST RECEIVED | ack_mode='{ackMode}' | " +
+                $"delivery_tag={e.DeliveryTag}");
 
-            switch (mode)
+            switch (ackMode)
             {
                 case "manual_ack":
-                    Console.WriteLine("[.NET] Using manual ACK");
                     _channel.BasicAck(e.DeliveryTag, false);
+                    LogHelper.LogInfo(reqId ?? "UNKNOWN", "✔ ACK | Success → remove from queue");
                     break;
 
                 case "manual_nack_requeue":
-                    Console.WriteLine("[.NET] Using NACK with requeue");
+                    LogHelper.LogWarn(reqId ?? "UNKNOWN",
+                        "⚠ ACK_MODE=manual_nack_requeue → NACK + requeue=True | " +
+                        "message goes BACK to queue and will be retried");
                     _channel.BasicNack(e.DeliveryTag, false, true);
                     break;
 
                 case "manual_nack_drop":
-                    Console.WriteLine("[.NET] Using NACK without requeue");
+                    LogHelper.LogWarn(reqId ?? "UNKNOWN",
+                        "⚠ ACK_MODE=manual_nack_drop → NACK + requeue=False | " +
+                        "message discarded permanently");
                     _channel.BasicNack(e.DeliveryTag, false, false);
                     break;
 
                 case "auto_ack_risk":
-                    Console.WriteLine("[.NET] Auto-ACK (risky - already removed from queue)");
-                    // No ACK needed - autoAck=true in consumer
+                    LogHelper.LogWarn(reqId ?? "UNKNOWN",
+                        "⚠ ACK_MODE=auto_ack_risk → RabbitMQ already removed this message | " +
+                        "if we crash NOW the message is LOST forever");
+                    // No ACK needed - already auto-acked
                     break;
 
                 default:
                     _channel.BasicAck(e.DeliveryTag, false);
+                    LogHelper.LogInfo(reqId ?? "UNKNOWN", $"✔ ACK | Unknown mode '{ackMode}' - using manual_ack");
                     break;
             }
+
+            _repository.LogPatternEvent($"ack_test_{ackMode}", message).Wait();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[.NET ERROR] {ex.Message}");
+            LogHelper.LogError("ACK-TEST-ERR", $"✘ Error | {ex.Message}");
             _channel.BasicNack(e.DeliveryTag, false, false);
         }
     }
