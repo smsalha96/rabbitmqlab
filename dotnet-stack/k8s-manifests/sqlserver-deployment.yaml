@@ -26,6 +26,30 @@ data:
     USE IncidentDB;
     GO
     
+    -- Create unified incidents table (matches Python/PostgreSQL schema)
+    -- Primary identifier: request_id (from logs, matches across both stacks)
+    IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'incidents')
+    BEGIN
+        CREATE TABLE incidents (
+            id INT IDENTITY(1,1),
+            request_id NVARCHAR(100) PRIMARY KEY,
+            email NVARCHAR(200),
+            description NVARCHAR(MAX),
+            category NVARCHAR(100),
+            severity NVARCHAR(20),
+            pod_id NVARCHAR(50),
+            duration_seconds FLOAT,
+            source NVARCHAR(20),
+            created_at DATETIME2 DEFAULT GETUTCDATE(),
+            updated_at DATETIME2
+        );
+        CREATE INDEX idx_incidents_created_at ON incidents(created_at DESC);
+        CREATE INDEX idx_incidents_source ON incidents(source);
+        PRINT 'Table incidents created';
+    END
+    GO
+    
+    -- Keep old table for backward compatibility (optional)
     IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'support_tickets')
     BEGIN
         CREATE TABLE support_tickets (
