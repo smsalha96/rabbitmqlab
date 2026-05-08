@@ -70,7 +70,7 @@ def detect_routing_path(method) -> str:
 
 def persist_ticket(req_id: str, pod_id: str, email: str, description: str,
                    category: str, duration: float) -> bool:
-    """Call the create_incident_ticket stored procedure. Returns True on success."""
+    """Call the create_incident_ticket stored procedure with request_id. Returns True on success."""
     try:
         conn = psycopg2.connect(
             dbname=POSTGRES_DB,
@@ -79,12 +79,13 @@ def persist_ticket(req_id: str, pod_id: str, email: str, description: str,
             host=POSTGRES_HOST,
         )
         cur = conn.cursor()
+        # Pass request_id as first parameter to match logs and database
         cur.execute(
-            "CALL create_incident_ticket(%s::VARCHAR, %s::TEXT, %s::VARCHAR, %s::VARCHAR, %s::FLOAT);",
-            (email, description, category, pod_id, duration),
+            "CALL create_incident_ticket(%s::VARCHAR, %s::VARCHAR, %s::TEXT, %s::VARCHAR, %s::VARCHAR, %s::FLOAT);",
+            (req_id, email, description, category, pod_id, duration),
         )
         conn.commit(); cur.close(); conn.close()
-        log_info(req_id, pod_id, f"✔ Persisted → category={category!r} duration={duration}s")
+        log_info(req_id, pod_id, f"✔ Persisted → request_id={req_id!r} category={category!r} duration={duration}s")
         return True
     except Exception as exc:
         log_error(req_id, pod_id, f"✘ PostgreSQL error | {exc}")
